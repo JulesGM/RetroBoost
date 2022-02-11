@@ -1,0 +1,15 @@
+debug loss allclose thing
+
+<doing> test baseline
+test non-baseline with const epsilon .5
+test non-baseline with const epsilon .2
+test non-baseline with const epsilon .8
+test non-baseline with linear epsilon .5 1000
+test non-baseline with linear epsilon .2 1000
+test non-baseline with linear epsilon .8 1000
+test non-baseline with linear epsilon .5 2000
+test non-baseline with linear epsilon .2 2000
+test non-baseline with linear epsilon .8 2000
+code language modeling
+
+test non-baseline with linear epsilon <depends on prev results>
