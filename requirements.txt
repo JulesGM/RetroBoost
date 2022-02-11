@@ -1,0 +1,9 @@
+torch
+transformers
+datasets
+numpy
+rich
+tqdm
+beartype
+more_itertools
+wandb
