@@ -13,3 +13,5 @@ test non-baseline with linear epsilon .8 2000
 code language modeling
 
 test non-baseline with linear epsilon <depends on prev results>
+
+test clm
