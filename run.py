@@ -8,11 +8,13 @@ import abc
 from dataclasses import dataclass, field
 import json
 from pathlib import Path
-from typing import *
+import re
 import sys
+from typing import *
 
 from beartype import beartype
 import datasets
+import fire
 import numpy as np
 import more_itertools
 import queue
@@ -22,7 +24,15 @@ import torch.nn as nn
 import transformers
 import wandb
 
+try:
+    import colored_traceback.auto
+except ImportError:
+    pass
+
+
 TokenizerType = transformers.tokenization_utils_fast.PreTrainedTokenizerFast
+SCRIPT_DIR = Path(__file__).absolute().parent
+
 
 class BaseEpsilonScheduler(abc.ABC):
     @abc.abstractmethod
@@ -138,7 +148,7 @@ class BoostingIterator(torch.utils.data.IterableDataset):
         epsilon_scheduler: BaseEpsilonScheduler, 
         loss_ema_alpha: float, 
         score_mode: str,
-        fixed_loss_warmup_steps: Optional[int]=None,
+        score_mode_config: Dict[str, Any],
         config: Dict[str, Any],
     ):
         super().__init__()
@@ -163,7 +173,7 @@ class BoostingIterator(torch.utils.data.IterableDataset):
         self.epoch_length = len(self.dataset)
         self.total_num_steps = 0
         self.score_mode = score_mode
-        self.fixed_loss_warmup_steps = fixed_loss_warmup_steps
+        self.score_mode_config = score_mode_config
         self.loss_moving_average = None
 
         if self.score_mode == "fixed_loss" or self.score_mode == "step_sensitive_fixed_loss":
@@ -470,10 +480,6 @@ class DataCollatorWithPadding:
         for feature in features:
             assert all_keys == feature.keys(), all_keys - feature.keys()
 
-        first = features[0]
-        
-
-
         batch = self.tokenizer.pad(
             features,
             padding=self.padding,
@@ -492,28 +498,45 @@ class DataCollatorWithPadding:
         
         return batch
 
+@beartype
+@dataclass
+class RunConfig:
+    run_name: str
+    regular_trainer: bool
 
-def main():
-    DATASET_TUPLE = ("super_glue", "rte")
-    CLASSIFIER_NAME = "microsoft/deberta-v3-large"
-    CLASSIFIER_BATCH_SIZE = 10
-    EPSILON_SCHEDULER_TYPE = "constant"
-    EPSILON_SCHEDULER_CONFIG = dict(
-        epsilon=.5,
-    )
-    LOSS_EMA_ALPHA = 0.995
-    REGULAR_TRAINER = True
+    dataset_tuple: List[str]
+    classifier_name: str
+
+    classifier_batch_size: int
+    epsilon_scheduler_type: str
+    epsilon_scheduler_config: Dict[str, Any]
+    loss_ema_alpha: float
+    
+    score_mode: str
+    score_mode_config: Dict[str, Any]
+
+
+def main(config_path: str):
+    # Short name mode: if we just get "us_large" instead of "configs/us_large.json", 
+    # we are in short name mode, we load use it to load the config. 
+    # We don't try to complete "us_large.json" because it might exist, just "us_large".
+    # We feel it's a good compromise.
+    if Path(config_path).name == config_path and not Path(config_path).suffix:
+        config_path = SCRIPT_DIR / "run_configs" / config_path
+        config_path = config_path.parent / (config_path.name + ".json")
+
+    ###############################################################################
+    # Load the config
+    ###############################################################################
+    with Path(config_path).open("r") as f:
+        meta_param_config = RunConfig(**json.load(f))
+
+    # Things that don't change
     WEIGHT_DECAY = 0.01
     LEARNING_RATE = 1e-5
     ENABLE_FP16 = True
-
-    SCORE_MODE = "step_sensitive_relative_loss"
-    FIXED_LOSS_WARMUP_STEPS = 10
-
-
-    # Things that don't change
     RETRIEVER_NAME = "facebook/contriever"
-    PATH_TO_VECTORS = Path(f"./vectors_{'_'.join(DATASET_TUPLE)}_{RETRIEVER_NAME.split('/')[-1]}/")
+    PATH_TO_VECTORS = Path(f"./vectors_{'_'.join(meta_param_config.dataset_tuple)}_{RETRIEVER_NAME.split('/')[-1]}/")
     CLASSIFIER_EVAL_BATCH_SIZE_MULTIPLIER = 1.5
     CLASSIFIER_DEVICE = "cuda"
     RETRIEVER_DEVICE = "cuda"
@@ -521,42 +544,39 @@ def main():
     SPLIT_RATIO = 0.85
     NUM_EPOCHS_TO_TRAIN_ON = 60
 
-    RUN_NAME = f"{'fp16' if ENABLE_FP16 else 'fp32'}_{SCORE_MODE}_{LOSS_EMA_ALPHA=}_{EPSILON_SCHEDULER_TYPE}_epsilon"
-
-
     ###############################################################################
     # Fast setup 
     ###############################################################################
-    config: Final = json.loads((PATH_TO_VECTORS / "config.json").read_text())
-    assert config["retriever_name"] == RETRIEVER_NAME, f"{config['retriever_name']} != {RETRIEVER_NAME}"
+    dataset_config: Final = json.loads((PATH_TO_VECTORS / "config.json").read_text())
+    assert dataset_config["retriever_name"] == RETRIEVER_NAME, f"{dataset_config['retriever_name'] != RETRIEVER_NAME}"
 
     wandb_config = dict(
-            classifier_batch_size=CLASSIFIER_BATCH_SIZE,
-            classifier_name=CLASSIFIER_NAME,
-            dataset_tuple=DATASET_TUPLE,
-            epsilon=dict(
-                scheduler_type=EPSILON_SCHEDULER_TYPE,
-                scheduler_config=EPSILON_SCHEDULER_CONFIG,
-            ),
-            loss_ema_alpha=LOSS_EMA_ALPHA,
-            random_seed=SEED,
-            regular_trainer=REGULAR_TRAINER,
-            retriever_name=RETRIEVER_NAME,
-            split_ratio=SPLIT_RATIO,
-            weight_decay=WEIGHT_DECAY,
-            learning_rate=LEARNING_RATE,
-            dataset_type=config["dataset_type"],
-            enable_fp16=ENABLE_FP16,
-        )
+        classifier_batch_size=meta_param_config.classifier_batch_size,
+        classifier_name=meta_param_config.classifier_name,
+        dataset_tuple=meta_param_config.dataset_tuple,
+        epsilon=dict(
+            scheduler_type=meta_param_config.epsilon_scheduler_type,
+            scheduler_config=meta_param_config.epsilon_scheduler_config,
+        ),
+        loss_ema_alpha=meta_param_config.loss_ema_alpha,
+        random_seed=SEED,
+        regular_trainer=meta_param_config.regular_trainer,
+        retriever_name=RETRIEVER_NAME,
+        split_ratio=SPLIT_RATIO,
+        weight_decay=WEIGHT_DECAY,
+        learning_rate=LEARNING_RATE,
+        dataset_type=dataset_config["dataset_type"],
+        enable_fp16=ENABLE_FP16,
+    )
 
     wandb.init(
         config=wandb_config,
         project="RetroBoost", 
         entity="retroboost",
-        name=RUN_NAME,
+        name=meta_param_config.run_name,
     )
 
-    EPSILON_SCHEDULER_TYPE_MAP = dict(
+    EPSILON_SCHEDULER_MAP = dict(
         constant=ConstantEpsilonScheduler,
     )
 
@@ -564,43 +584,43 @@ def main():
     np.random.seed(0)
     torch.manual_seed(0)
 
-    classifier_tokenizer: Final = transformers.AutoTokenizer.from_pretrained(CLASSIFIER_NAME)
+    classifier_tokenizer: Final = transformers.AutoTokenizer.from_pretrained(meta_param_config.classifier_name)
 
     # Load the config
 
     # Load the datasets
-    dataset_train: Final = datasets.load_dataset(*DATASET_TUPLE, split=f"train[:{SPLIT_RATIO:.0%}]")
-    dataset_validation: Final = datasets.load_dataset(*DATASET_TUPLE, split=f"train[{SPLIT_RATIO:.0%}:]")
+    dataset_train: Final = datasets.load_dataset(*meta_param_config.dataset_tuple, split=f"train[:{SPLIT_RATIO:.0%}]")
+    dataset_validation: Final = datasets.load_dataset(*meta_param_config.dataset_tuple, split=f"train[{SPLIT_RATIO:.0%}:]")
 
     ALL_LABELS = set(dataset_train["label"])
     NUM_LABELS = len(ALL_LABELS)
     assert ALL_LABELS == set(range(NUM_LABELS))
 
     # Delete the extra fields
-    if config["dataset_type"] == "dual_entry_classification":
+    if dataset_config["dataset_type"] == "dual_entry_classification":
         fields = dataset_train[0].keys()
-        dataset_train.remove_columns(fields - {config["field_a_name"], config["field_b_name"], "label"} )
+        dataset_train.remove_columns(fields - {dataset_config["field_a_name"], dataset_config["field_b_name"], "label"} )
 
     def preprocess_function(examples, tokenizer, config):
-        if config["dataset_type"] == "single_entry_classification":
+        if dataset_config["dataset_type"] == "single_entry_classification":
             return tokenizer(examples["text"], truncation=True, padding=True)
-        elif config["dataset_type"] == "dual_entry_classification":
+        elif dataset_config["dataset_type"] == "dual_entry_classification":
             return tokenizer(
-                examples[config["field_a_name"]], 
-                examples[config["field_b_name"]], 
+                examples[dataset_config["field_a_name"]], 
+                examples[dataset_config["field_b_name"]], 
                 truncation=True, 
                 padding=True,
             )
 
-        raise ValueError(f"Unknown dataset type {config['dataset_type']}")
+        raise ValueError(f"Unknown dataset type {dataset_config['dataset_type']}")
 
     tokenized_training: Final = dataset_train.map(
-        lambda examples: preprocess_function(examples, classifier_tokenizer, config), 
+        lambda examples: preprocess_function(examples, classifier_tokenizer, dataset_config), 
         batched=True
     ).shuffle(seed=SEED)
 
     tokenized_validation: Final = dataset_validation.map(
-        lambda examples: preprocess_function(examples, classifier_tokenizer, config), 
+        lambda examples: preprocess_function(examples, classifier_tokenizer, dataset_config), 
         batched=True
     ).shuffle(seed=SEED)
 
@@ -609,8 +629,8 @@ def main():
         eval_steps=10,
         output_dir="./results",
         learning_rate=LEARNING_RATE,
-        per_device_train_batch_size=CLASSIFIER_BATCH_SIZE,
-        per_device_eval_batch_size=int(CLASSIFIER_BATCH_SIZE * CLASSIFIER_EVAL_BATCH_SIZE_MULTIPLIER),
+        per_device_train_batch_size=meta_param_config.classifier_batch_size,
+        per_device_eval_batch_size=int(meta_param_config.classifier_batch_size * CLASSIFIER_EVAL_BATCH_SIZE_MULTIPLIER),
         num_train_epochs=NUM_EPOCHS_TO_TRAIN_ON,
         report_to="wandb",
         weight_decay=WEIGHT_DECAY,
@@ -621,17 +641,17 @@ def main():
         retriever_name=RETRIEVER_NAME, 
         path_to_vectors=PATH_TO_VECTORS, 
         device=RETRIEVER_DEVICE, 
-        dataset_type=config["dataset_type"],
+        dataset_type=dataset_config["dataset_type"],
     )
     retriever_client: Final = retriever
 
     classifier: Final = transformers.AutoModelForSequenceClassification.from_pretrained(
-        CLASSIFIER_NAME, num_labels=NUM_LABELS
+        meta_param_config.classifier_name, num_labels=NUM_LABELS
     )
 
     classifier.config.problem_type = "single_label_classification"
 
-    if REGULAR_TRAINER:
+    if meta_param_config.regular_trainer:
         TrainerClass = transformers.Trainer    
         ds_train = tokenized_training
     else:
@@ -641,15 +661,15 @@ def main():
             dataset=dataset_train, 
             retriever_client=retriever_client, 
             classifier=classifier, 
-            epsilon_scheduler=EPSILON_SCHEDULER_TYPE_MAP[EPSILON_SCHEDULER_TYPE](**EPSILON_SCHEDULER_CONFIG), 
+            epsilon_scheduler=EPSILON_SCHEDULER_MAP[meta_param_config.epsilon_scheduler_type](**meta_param_config.epsilon_scheduler_config), 
             seed=SEED,
             retriever_device=RETRIEVER_DEVICE, 
             classification_device=CLASSIFIER_DEVICE,
             classification_tokenizer=classifier_tokenizer,
-            loss_ema_alpha=LOSS_EMA_ALPHA,
-            config=config,
-            score_mode=SCORE_MODE,
-            fixed_loss_warmup_steps=FIXED_LOSS_WARMUP_STEPS,   
+            loss_ema_alpha=meta_param_config.loss_ema_alpha,
+            config=dataset_config,
+            score_mode=meta_param_config.score_mode,
+            score_mode_config=meta_param_config.score_mode_config,
         )
 
     trainer = TrainerClass(
@@ -669,8 +689,5 @@ def main():
     print(trainer.evaluate())
 
 
-
-
-
 if __name__ == "__main__":
-    main()
+    fire.Fire(main)
