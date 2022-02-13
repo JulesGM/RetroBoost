@@ -1,8 +1,9 @@
 Fixed loss thing
     check ddp backend
-[done] only compute average loss of random samples
 
-[done] test baseline
+Accuracy increases but loss goes up! We trade off a bit of average loss for strenght with hard samples
+
+
 wd 0.01:
     [worse than baseline] test non-baseline with const epsilon .5 wd 0.01 
     [better than .5 in the begining, then equal]test non-baseline with const epsilon .25
