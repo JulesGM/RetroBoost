@@ -5,11 +5,11 @@ Accuracy increases but loss goes up! We trade off a bit of average loss for stre
 
 
 wd 0.01:
-    [worse than baseline] test non-baseline with const epsilon .5 wd 0.01 
-    [better than .5 in the begining, then equal]test non-baseline with const epsilon .25
-    [bad]test non-baseline with const epsilon .75
-    [bad]test non-baseline with const epsilon .875
-    [equally as bad] INVERSE test non-baseline with const epsilon .875
+    test non-baseline with const epsilon .5 wd 0.01 
+    test non-baseline with const epsilon .25
+    test non-baseline with const epsilon .75
+    test non-baseline with const epsilon .875
+    INVERSE test non-baseline with const epsilon .875
     test non-baseline with const epsilon .125
     test non-baseline with linear epsilon .5 1000
     test non-baseline with linear epsilon .2 1000
@@ -22,3 +22,7 @@ code language modeling
 test non-baseline with linear epsilon <depends on prev results>
 
 test clm
+
+
+####################################################################################
+Giving ourselves more resilience would be great. We do this by testing a different dataset I guess.
